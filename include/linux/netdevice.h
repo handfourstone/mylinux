@@ -236,8 +236,12 @@ struct netdev_hw_addr_list {
 	netdev_hw_addr_list_for_each(ha, &(dev)->mc)
 
 struct hh_cache {
+/* 以字节表示的缓存帧的长度。*/
 	u16		hh_len;
 	u16		__pad;
+/* 用于在竞争条件下保护hh_cache结构的锁。例如一个 IP 函数想传送
+ * 一个封包，它在将枕头从 hh_cache 结构复制到封包的 skb 缓冲区前
+ * 需要获得只读锁。*/
 	seqlock_t	hh_lock;
 
 	/* cached hardware header; allow for machine alignment needs.        */
@@ -246,6 +250,7 @@ struct hh_cache {
 	(HH_DATA_MOD - (((__len - 1) & (HH_DATA_MOD - 1)) + 1))
 #define HH_DATA_ALIGN(__len) \
 	(((__len)+(HH_DATA_MOD-1))&~(HH_DATA_MOD - 1))
+/* 缓存的帧头。*/
 	unsigned long	hh_data[HH_DATA_ALIGN(LL_MAX_HEADER) / sizeof(long)];
 };
 
