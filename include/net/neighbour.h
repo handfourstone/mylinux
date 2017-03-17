@@ -524,6 +524,17 @@ struct neighbour *neigh_lookup_nodev(struct neigh_table *tbl, struct net *net,
 				     const void *pkey);
 struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 				 struct net_device *dev, bool want_ref);
+
+/* 创建数据结构本身要用的函数，它的返回值是指向创建 neighbour
+ * 结构的指针。
+ * =>@ tbl: 表示使用的邻居协议。设置这个参数的方式很简单：如果
+ * 		调用者来自 IPv4 程序(也就是说，来自 arp_rcv)，就设置
+ * 		为 arp_tbl 等等。
+ * =>@ pkey: 标识 L3 地址。之所以被称为 pkey，是因为它在缓存
+ * 		查找中被用作查找关键字。
+ * =>@ dev: 与要创建的邻居项相关的设备。因为每个 neighbour 项
+ * 		都与一个 L3 地址相关联，并且后者总是与一个设备相关联，
+ * 		所以 neighbour 实例就与一个设备相关联。*/
 static inline struct neighbour *neigh_create(struct neigh_table *tbl,
 					     const void *pkey,
 					     struct net_device *dev)

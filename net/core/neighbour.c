@@ -264,6 +264,13 @@ int neigh_ifdown(struct neigh_table *tbl, struct net_device *dev)
 }
 EXPORT_SYMBOL(neigh_ifdown);
 
+/* 新的 neighbour 数据结构是用该函数来分配空间的，该函数
+ * 也用于初始化一些参数，例如：嵌入式定时器，引用计数器，
+ * 指向关联的 neigh_table (邻居协议)结构的指针和对分配的
+ * neighbour 结构数目的整体统计。
+ * neigh_alloc 函数使用邻居子系统初始化时建立的内存池。如果
+ * 当前分配的邻居结构数目大于配置的阈值，并且接下来的垃圾
+ * 回收器试图释放某块内存失败了，该函数就无法完成分配。*/
 static struct neighbour *neigh_alloc(struct neigh_table *tbl, struct net_device *dev)
 {
 	struct neighbour *n = NULL;
@@ -449,6 +456,7 @@ struct neighbour *neigh_lookup_nodev(struct neigh_table *tbl, struct net *net,
 }
 EXPORT_SYMBOL(neigh_lookup_nodev);
 
+/* 被 neigh_create 在 neighbour.h 调用。*/
 struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 				 struct net_device *dev, bool want_ref)
 {
@@ -462,11 +470,18 @@ struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 		rc = ERR_PTR(-ENOBUFS);
 		goto out;
 	}
-
+/* 在 key_len 的帮助下，pkey 被复制到邻居数据结构中。key_len 提供
+ * 被复制的数据的长度。这是必须的，因为 neighbour 项是被与协议无关
+ * 的缓存查找函数使用，并且各种协议表示地址的字节长度不同。*/
 	memcpy(n->primary_key, pkey, key_len);
 	n->dev = dev;
+/* neighbour 项中包含了一个 对net_device 类型的元素 dev 的引用，内
+ * 核会使用 dev_hold 来对后者的引用计数加1,以此保证该设备在
+ * neighbour 结构存在时不会被删除。*/
 	dev_hold(dev);
 
+/******** 邻居初始化 ********/
+/* 协议执行的初始化。 */
 	/* Protocol specific setup. */
 	if (tbl->constructor &&	(error = tbl->constructor(n)) < 0) {
 		rc = ERR_PTR(error);
@@ -481,6 +496,7 @@ struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 		}
 	}
 
+/* 设备执行的初始化。*/
 	/* Device specific setup. */
 	if (n->parms->neigh_setup &&
 	    (error = n->parms->neigh_setup(n)) < 0) {
@@ -488,6 +504,9 @@ struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 		goto out_neigh_release;
 	}
 
+/* 设置 confirmed 字段，将 confirmed 值减小一小段时间，是为了
+ * 使邻居状态能比平常和要求有可到达性证据时，稍快点转移到
+ * NUD_STALE 态。*/
 	n->confirmed = jiffies - (NEIGH_VAR(n->parms, BASE_REACHABLE_TIME) << 1);
 
 	write_lock_bh(&tbl->lock);
