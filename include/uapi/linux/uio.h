@@ -12,7 +12,11 @@
 #include <linux/compiler.h>
 #include <linux/types.h>
 
-
+/******************************************************************************
+ * 输入输出向量
+ * @iov_base 指向一个 buffer 的地址。
+ * @iov_len buffer 中的数据长度。
+ * ***************************************************************************/
 struct iovec
 {
 	void __user *iov_base;	/* BSD uses caddr_t (1003.1g requires void *) */

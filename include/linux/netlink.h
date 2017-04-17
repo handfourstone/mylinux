@@ -42,7 +42,10 @@ extern void netlink_table_ungrab(void);
 #define NL_CFG_F_NONROOT_RECV	(1 << 0)
 #define NL_CFG_F_NONROOT_SEND	(1 << 1)
 
-/* optional Netlink kernel configuration parameters */
+/******************************************************************************
+ * optional Netlink kernel configuration parameters
+ * @input 当 netlink 有消息到来时的处理函数。
+ * ***************************************************************************/
 struct netlink_kernel_cfg {
 	unsigned int	groups;
 	unsigned int	flags;

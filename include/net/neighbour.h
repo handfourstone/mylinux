@@ -315,7 +315,7 @@ struct neigh_ops {
 	int			(*output)(struct neighbour *, struct sk_buff *);
 /* 当已经知道邻居是可到达时(邻居状态是 NUD_CONNECTED)，使用该
  * 函数。因为所有需要的信息都是满足的，该函数只要简单填充一下
- * L2 帧头，因此它比 output 快。
+ * L2 帧头，因此它比 output 快。*/
 	int			(*connected_output)(struct neighbour *, struct sk_buff *);
 };
 /* 用于基于目的地址的代理。 */
@@ -635,6 +635,8 @@ static inline struct neigh_parms *neigh_parms_clone(struct neigh_parms *parms)
  *	Neighbour references
  */
 
+/* 每次执行，会对 neighbour 的引用计数减 1，当减到 0 之后，
+ * 就会删除该 neighbour 项。*/
 static inline void neigh_release(struct neighbour *neigh)
 {
 	if (atomic_dec_and_test(&neigh->refcnt))

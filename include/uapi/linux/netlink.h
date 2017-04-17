@@ -32,7 +32,14 @@
 #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
 
 #define MAX_LINKS 32		
-
+/******************************************************************************
+ * @nl_family 必须设置为 AF_NETLINK 或者是 PF_NETLINK。
+ * @nl_pad    目前还没有使，因此设置为 0。
+ * @nl_pid    接收或发送消息的进程 id。如果希望内核处理消息或者多播消息，就把该
+ *            字段设置为 0。否则设置为进程 id。
+ * @nl_group  用于指定多播组，bind 函数用于把调用进程加入到该字段指定的多播组，
+ *            如果设置为 0，表示调用者不加入任何多播组。
+ ******************************************************************************/
 struct sockaddr_nl {
 	__kernel_sa_family_t	nl_family;	/* AF_NETLINK	*/
 	unsigned short	nl_pad;		/* zero		*/
@@ -40,6 +47,14 @@ struct sockaddr_nl {
        	__u32		nl_groups;	/* multicast groups mask */
 };
 
+/******************************************************************************
+ * @nlmsg_len  消息的总长度，包括紧跟该结构的数据部分长度以及该结构的大小。
+ * @nlmsg_type 用于应用内部定义消息的类型，它对 netlink 内核实现是透明的，因此
+ *             绝大部分下设置为 0。
+ * @nlmsg_flag 设置消息标志。
+ * @nlmsg_seq  用于应用追踪消息，表示顺序号。
+ * @nlmsg_pid  应用追踪消息，表示消息来源的进程 ID 。
+ *****************************************************************************/
 struct nlmsghdr {
 	__u32		nlmsg_len;	/* Length of message including header */
 	__u16		nlmsg_type;	/* Message content */

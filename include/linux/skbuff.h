@@ -721,6 +721,9 @@ struct sk_buff {
 #define PKT_TYPE_OFFSET()	offsetof(struct sk_buff, __pkt_type_offset)
 
 	__u8			__pkt_type_offset[0];
+/*******************************************************************************
+ * 该数据包的类型。取值类型在 <include/uapi/linux/if_packet.h> 中定义。
+ * ****************************************************************************/
 	__u8			pkt_type:3;
 	__u8			pfmemalloc:1;
 	__u8			ignore_df:1;

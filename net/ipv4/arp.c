@@ -648,6 +648,9 @@ EXPORT_SYMBOL(arp_xmit);
 static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
+/*******************************************************************************
+ * __in_dev_get_rcu() 定义于 <include/linux/inetdevice.h> 中
+ * ****************************************************************************/
 	struct in_device *in_dev = __in_dev_get_rcu(dev);
 	struct arphdr *arp;
 	unsigned char *arp_ptr;

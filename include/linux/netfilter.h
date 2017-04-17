@@ -60,6 +60,16 @@ struct nf_hook_state {
 typedef unsigned int nf_hookfn(void *priv,
 			       struct sk_buff *skb,
 			       const struct nf_hook_state *state);
+
+/******************************************************************************
+ * @list     链表成员
+ * @hook     钩子函数指针
+ * @dev
+ * @priv
+ * @pf       协议簇，对于 IPv4 来说就是 PP_INET
+ * @hooknum  hook 类型
+ * @priority 优先级
+ * ***************************************************************************/
 struct nf_hook_ops {
 	struct list_head	list;
 

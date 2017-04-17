@@ -87,6 +87,9 @@ enum net_device_flags {
 	IFF_POINTOPOINT			= 1<<4,  /* volatile */
 	IFF_NOTRAILERS			= 1<<5,  /* sysfs */
 	IFF_RUNNING			= 1<<6,  /* volatile */
+/*******************************************************************************
+ * 在该 NIC 上面禁止地址解析。
+ * ****************************************************************************/
 	IFF_NOARP			= 1<<7,  /* sysfs */
 	IFF_PROMISC			= 1<<8,  /* sysfs */
 	IFF_ALLMULTI			= 1<<9,  /* sysfs */

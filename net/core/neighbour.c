@@ -117,6 +117,8 @@ unsigned long neigh_rand_reach_time(unsigned long base)
 EXPORT_SYMBOL(neigh_rand_reach_time);
 
 
+/* 垃圾回收函数——————同步清理。
+ * 图 doc/image/neighbour/neigh_forced_gc 给出了该函数内部执行流程。*/
 static int neigh_forced_gc(struct neigh_table *tbl)
 {
 	int shrunk = 0;
@@ -507,6 +509,7 @@ struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 /* 设置 confirmed 字段，将 confirmed 值减小一小段时间，是为了
  * 使邻居状态能比平常和要求有可到达性证据时，稍快点转移到
  * NUD_STALE 态。*/
+/* n->parms->data[NEIGH_VAR_BASE_REACHABLE_TIME] */
 	n->confirmed = jiffies - (NEIGH_VAR(n->parms, BASE_REACHABLE_TIME) << 1);
 
 	write_lock_bh(&tbl->lock);
@@ -700,6 +703,14 @@ static inline void neigh_parms_put(struct neigh_parms *parms)
  *	neighbour must already be out of the table;
  *
  */
+/* 删除一个邻居项，完成以下过程：
+ * 1 停止所有未决的定时器；
+ * 2 释放所有对外部数据结构的引用；
+ * 3 如果一个邻居协议提供了 destructor 方法，该邻居协议就会执行
+ *   这个方法自己清理邻居项；
+ * 4 如果 arp_queue 队列非空，就要将其清空；
+ * 5 将表示主机使用的 neighbour 项总数的全局计数器减 1;
+ * 6 释放该 neighbour 结构(将其占用的内存空间返还给内存池);*/
 void neigh_destroy(struct neighbour *neigh)
 {
 	struct net_device *dev = neigh->dev;
