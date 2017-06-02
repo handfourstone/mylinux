@@ -1,0 +1,973 @@
+#声明
+本文档全部是个人观点，存在错误，请各位批评改正。\
+--2017.05.03 拓磊
+
+#邻居子系统
+
+## 何为邻居
+属于同一个LAN的主机(与其说是主机，不如说网络接口准确)之间互为邻居。如何判断是否属于同一个LAN？两台主机，IP与子网掩码相与的结果相同，两者之间通信不需要任何转换的话，就属于同一个LAN。
+
+## 邻居协议
+
+在公网上，数据传输是基于三层地址进行寻址的。而在一个LAN内，数据传输是基于二层地址进行寻址的。如何获取接收方的二层地址就是通过邻居协议实现的。
+
+邻居协议的目标如下图。
+
+							+------+        +------+        +-------------+
+							| IPv4 |        | IPv6 | <----> | route table |
+							+------+        +------+        +-------------+
+								|               |
+								V               V
+							+----------------------+        +-------------+
+							|        GNI(VFT)      | <----> | route cache |
+		+-----------+		+----------------------+        +-------------+
+		| ARP cache | <---> |    ARP    |    ND    | <----> |   ND cache  |
+		+-----------+		+----------------------+        +-------------+
+							|        GNI(VFT)      |
+							+----------------------+
+										| dev_queue_xmit
+										V
+							+----------------------+
+							|        TC/QoS        |
+							+----------------------+
+										|
+										V
+							+----------------------+
+							|     device driver    |
+							+----------------------+
+		GNI: Generic Neighbouring Interface。通用邻居接口
+		TC: Traffic Control。流量控制
+		QoS: Quality of Service。服务质量
+	图1-1大蓝图
+
+
+
+传输一个封包时，执行下面的步骤：
+1. 本地主机的路由子系统选择L3目的地址(下一个跃点)。
+2. 根据路由表，如果下一个跃点在同一个网路中(也就是说下一个跃点是邻居)，邻居层就把目的L3地址解析为L2地址。这个关联被放入缓存以便将来再次使用。这样的话，如果一个应用程序短期内发送多个封包给另一个应用程序，那么只在发送第一个封包的时候使用一次邻居协议。
+3. 最后，一个函数，比如dev_queue_xmit负责完成发送，将封包传递给流量控制或者QoS层。尽管上图中只给出了dev_queue_xmit,但邻居曾实际也能调用其他函数。
+
+
+邻居协议的通用基础结构
+- 为每个协议存放一个缓存来存放L3到L2转换的结果。
+- 提供在缓存中增、删、改、查一个特定邻居项的函数。查找函数必须要快，因为它会影响整个系统的性能。
+- 为每个协议缓存的数据项提供一种老化机制。
+- 当缓存已满时并且正好要创建新的映射项时，提供选择替换策略。
+- 为每个邻居提供一个请求队列。当准备要发送一个封包且其L2地址还不在缓存中时，就必须把这个封包放到缓存区中，直到发出邻居请求并收到应答。
+
+邻居代理
+
+邻居协议的代理服务器就是一台主机，在收到不属于自己地址的邻居请求之后，它能够代替拥有这个地址的主机做出应答。因为有了代理，位于不同LAN中的主机可以互相通信，就好象它们在同一个LAN中。
+
+使用代理的条件
+
+- 请求的地址和代理服务器收到请求的接口上配置的地址不属于同一个子网。
+- 必须启动代理功能。
+
+两种代理方式
+
+- 基于设备\
+  代理所有的请求。IPv4中最常见，IPv6中不使用。
+- 基于目的地址\
+  代理特定的请求。IPv6的标准，IPv4中也可以使用。
+
+两种代理的优先级如下图所示。
+
+					yes +=============+ no
+				--------| Local ADDR? |----------
+				|       +=============+         |
+				|                               |Device proxying
+				|                               V
+				|                       +==================+
+				|               yes     | Is proxy enabled | no
+				|       ----------------|    on RX NIC?    |-----
+				|       |               +==================+    |
+				|       |                                       |
+				|       |                                       |Destination-based proxying
+				|       |                                       V
+				|       |                             +======================+
+				|       |                       yes   | Is requested address | no
+				|       |       ----------------------|  peoxyed on RX NIC?  |-------
+				|       |       |                     +======================+      |
+				|       |       |                                                   |
+				V       V       V                                                   V
+		+-------------------------------+                                   +----------------+
+		| Reply to solicitation request |                                   | Ignore request |
+		+-------------------------------+                                   +----------------+
+	图1-2设备代理和目的代理的优先级
+
+传输一个封包，发送邻居请求的流程。
+
+					-----------------------------------------
+					|										|
+					V										V
+		 +---------------------+				+--------------------------+
+		 | Same logical subnet |			----| Different logical subnet |-----
+		 +---------------------+			|	+--------------------------+	|
+					|						|									|
+					|						V									V
+					|				+-----------------+				+---------------------+
+					|				| Route available |				| No route available  |
+					|				| (or default GW) |				| (and no default GW) |
+					|				+-----------------+				+---------------------+
+					|						|									|
+					V						V									V
+		+----------------------+	+-----------------+				+-----------------------+
+		|   Solicitation for   |    | Solicitation for|				| Error,no solicitation |
+		| destination address  |	|  for GW address |				|      is generated     |
+		+----------------------+	+-----------------+				+-----------------------+
+	图1-3 发送邻居请求
+
+linux 处理邻居请求，桥接模块优先于代理模块
+
+																-------------------------------------------------
+																|												|
+																V												V
+														+----------------+								+---------------+
+														| bridge disable |								| bridge enable |
+														+----------------+								+---------------+
+																|												|
+																V												|
+										-----------------------------------------								|
+										|										|								|
+										V										V								|
+								+-----------------+						+----------------+						|
+								|    Different    |						|      same      |						|
+								| logical subnet  |						| logical subnet |						|
+								+-----------------+						+----------------+						|
+										|										|								|
+										V										V								|
+							-------------------------					---------------------					|
+							|						|					|					|					|
+							V						V					V					V					|
+					+---------------+		+----------------+	+----------------+	+---------------+			|
+					| Proxy enabled |		| Proxy disabled |	| remote address |	| local address |			|
+					+---------------+		+----------------+	+----------------+	+---------------+			|
+							|						|					|					|					|
+							V						|					|					|					|
+				-----------------					|					|					|					|
+				|				|					|					|					|					|
+				V				V					|					|					|					|
+			+---------+		+---------+				|					|					|					|
+			| Invalid |		|  Valid  |				|					|					|					|
+			| address |		| address |				|					|					|					|
+			+---------+     +---------+				|					|					|					|
+				|				|					|					|					|					|
+				V				V					V					V					V					V
+		+------------+	+--------------+	+--------------+	+--------------+	+--------------+	+--------------+
+		| Proxy will |	| Solicitation |	| Solicitation |	| solicitation |	| solicitation |	| solicitation |
+		| not reply  |	|   will be    |	|  is droped   |	|  is ignored  |	| is processed |	|  is bridged  |
+		+------------+	| processed by |	+--------------+	| (Target host |	+--------------+	+--------------+
+						|  the proxy   |						|  will reply  |
+						+--------------+						|    to the    |
+																| solicitation)|
+																+--------------+
+	图1-5 处理邻居请求
+
+
+逻辑子网(logical subnet):IP子网。
+物理子网(physical subnet):LAN。
+在同一个物理子网内的主机配置有相同的逻辑子网，才能通信。
+
+		+----------------+		+----------------+
+		|      PC1       |		|      PC2       |
+		| 192.168.2.1/24 |		| 192.168.3.1/24 |
+		+----------------+		+----------------+
+				|						|
+				|						|
+		=========================================== LAN
+		PC1与PC2属于同一个LAN，但逻辑子网不同，所以不能通信。想要通信，就必须要有路由转换。
+	图1-6
+
+L3到L2地址解析步骤
+
+		+=======================+ no
+		| Is resolution needed? |----------------------------------------------------
+		+=======================+													|
+					|yes															|
+					V																|
+		+=============================+ yes		+-----------------------+			|
+		| Is result already in cache? |-------->| Get it from the cache |--------	|
+		+=============================+			+-----------------------+		|	|
+					|no															|	|
+					V															|	|
+			+============+ success  +-----------------------+					|	|
+			| resilve it |--------->| Store it in the cache |----------------	|	|
+			+============+			+-----------------------+				|	|	|
+					|failure												|	|	|
+					V														V	V	V
+			+-----------------+											+---------------+
+			| Return an error |											|      End      |
+			+-----------------+											+---------------+
+	L3地址到L2地址的解析步骤
+
+简化的转换中状态示意图
+
+											+--------------+
+				Max num solicitation		| Just created |
+				not reached        			+--------------+
+				--------->-------->------\			|start resolution
+				^						  \			|
+				|		 Not reply		   \		|
+				|		 within a given		\		V			Received
+		+--------------+ amount of time  +-------------------+  solicitation reply +----------------------+
+		| Solicitation |<----------------| Send solicitation |--------->---------->| Resolution completed |
+		|    failed    |				 +-------------------+                     |     successfully     |
+		+--------------+							|                              +----------------------+
+				|									|
+				|	Max num solicitation			V
+				V	reached		 		 +-------------------+
+				----->------------->---->| Resolution failed |
+										 +-------------------+
+
+创建邻居项的时机：
+
+- 高层给邻居发包，没有相应的邻居项
+- 收到邻居请求
+
+
+邻居项的状态转换如下图
+
+													+-----------+
+							-------<--------<-------| New entry |----->------>---
+							|						+-----------+				|				1. multcast/broadcast
+							|							|	|					|Special cases	2. loopback device
+							|				------<------	|					|				3. point to point device
+							V				|				|					V				4. device that does not
+					 ###############		|		   ##########		  ###########			   need to resolve the
+					 #NUD_PERMANENT#		|		   #NUD_NONE#		  #NUD_NOARP#			   mapping
+					 ###############		|		   ##########		  ###########
+											|				|
+						------------<-------				|
+						|									|solocit request send
+						|					  ---->--		|
+		 Address learned|					  |		|		V TIMER
+		 from an ingress|	     Timer expired|	  ################		Timer expired(no more attemps available)
+		 socilit request|	     (more attemps|	  #NUD_INCOMPLETE#-->----------------------------------------------------
+						|	     available)	  |	  ################														|
+						|					  |		|		|															|
+						|					  --<----		|Received proof of reachability								|
+						|									|(solicit apply)											|
+						|									V															|
+						|							 ###############				Receive proof of reachability		V
+						|	------------------<------#NUD_REACHABLE#---<-------------------------(solicit reply			|
+						|	|						 ###############							|or L4 confirm)			|
+						|	|								|									|						|
+		================|===|===============================|===================================|======================	|
+		|				|	| Entry not used for more		^									|					  |	|
+		|				|	| than REACHABLE_TIME secconds	| Received proof of reachability	|					  |	|
+		|	 ----->--	|	|								^ (silicit reply or L4 confirm)		^	   --<---		  |	|
+		|	 |		|	V	V								|									|	   |	|		  |	|
+		|	 |	   ###########						   ###########							  ###########	|		  |	|
+		|	 |	   #NUD_STALE#----------------->-------#NUD_DELAY#------>---------------------#NUD_PROBE#	|		  |	|
+		|	 |	   ###########		Entry used		   ########### Timer expired			  ###########	|		  |	|
+		|	 |		|	|								TIMER	   (delay_probe_time)			| TIMER|	|		  |	|
+		|	 --<-----	|																		|	   ---->-		  |	|
+		|	Entry not	|																		|		Timer expired |	|
+		|	used for	|																		|		(more attemps |	|
+		|	less than	|																		|		available)	  |	|
+		|	gc_staletime|																		|					  |	|
+		|	secconds	V																		|Timer expired		  |	|
+		|				|																		|(no more attemps	  |	|
+		|				|				Reachability confirmation								|available)			  |	|
+		================|=======================================================================|====================== |
+						|																		V						|
+						|																  ############					|
+						|																  #NUD_FAILED#----------<--------
+						|																  ############
+						|																		|
+						|																		|Garbage collection
+						|Entry not used for more than gc_staletime seccond						V
+						|(and reference count=1)										+----------------+
+						------->------------------------------------------------->------| Entey deletion |
+																						+----------------+
+	NUD 状态转换图
+
+基本状态
+
+- NUD_NONE\
+	邻居项刚被创建，还没有状态可用。
+- NUD_INCOMPLETE\
+	一个**邻居请求**已经发出，但还没有收到应答。在这个状态，不是用任何硬件地址(甚至旧地址也不使用，那是NUD_STALE状态)。
+- NUD_REACHABLE\
+	邻居的地址被放入缓存，并且知道该邻居是可到达的(已经有了可到达性证据)。
+- NUD_FAILED\
+	由于邻居请求失败，将邻居标记为不可到达。当创建一个新邻居项时有可能进入该状态，或者NUD_PROBE状态也会触发到该状态
+- NUD_STALE\
+	缓存中包含该邻居的地址，但是该地址已经有一段时间(struct neigh_parms -> reachable_time )没有进行确认了，到下次有封包要到达这个邻居时，要启动可到达性认证进程。
+- NUD_DELAY\
+	当发送一个封包到一个邻居，且该邻居相关的缓存项处于NUD_STALE时，就进入这个状态。NUD_DELAY状态表示一个时间窗，通过窗口可以通过外部主机来证实该邻居的可到达性。最简单的确认方式就是，若被怀疑的邻居发出一个封包，则表明它仍在运行且能够访问。\
+	为了进行可达性确认，该状态给网络层一个时间期限，这个期间内内核不发出邻居请求，这样节省了网络带宽，这样节省了网络带宽、降低了CPU的利用率。\
+	如果请求没有被确认，那么该缓存项就进入下一个状态:NUD_PROBE。这个状态通过明确的邻居请求，或者协议使用的其它机制判定指定邻居的状态。
+- NUD_PROBE\
+	邻居状态处于NUD_DELAY是，在时间窗口结束之前，还没有收到该邻居的可到达性验证时，它的状态就转变为NUD_PROBE，同时开始发送**邻居请求**消息。
+- NUD_NOARP\
+	该状态用于标记不要任何协议进行L3到L2的地址映射的邻居。
+- NUD_PERMANENT\
+	邻居的L2地址是静态配置(也就是说使用用户空间命令)
+
+
+
+派生状态
+
+- NUD_VALID\
+	如果某邻居项的状态是下列状态之一，那么它被认为是NUD_VALID态。这些状态代表邻居项有一个可用的二层地址。\
+	NUD_PERMANENT\
+	NUD_NOARP\
+	NUD_REACHABLE\
+	NUD_PROBE\
+	NUD_STALE\
+	NUD_DELAY
+- NUD_CONNECTED\
+	这个状态是NUD_VALID的子状态，没有未决的确认要处理就是该状态。、
+	NUD_PERMANENT\
+	NUD_NOARP\
+	NUD_REACHABLE
+- NUD_IN_TIMER\
+	当一个邻居项的状态不是很清晰时，邻居子系统就为其运行一个定时器。与此相关的基本状态是包括:\
+	NUD_INCOMPLETE\
+	NUD_DELAY\
+	NUD_PROBE
+
+派生类型主要是为了使用方便，比如在删除一个邻居项之前，需要停止所有与它相关联还在运行中的定时器，NUD_IN_TIMER的三个基本类型都会使用到定时器，所以在删除一个邻居项的时候，只要用该邻居项的状态与NUD_IN_TIMER按位与，就可以判断是否有定时器在运行。
+
+
+可到达性确认
+
+一个邻居项有一段时间没有使用，就无法判断其现在是否仍然有效，需要对其进行可到达性确认。NUD_STALE、NUD_DELAY、NUD_PROBE三个状态都支持可到达性确认。在确认过程中，缓存中的信息仍然可用，因为假设其仍然有效。
+
+两种确认方式
+
+- 邻居请求\应答\
+	单播的邻居请求/应答认证，双方都会更新邻居缓存。收到广播请求的应答之后，邻居状态转移到NUD_STALE状态，而不是NUD_REACHABLE状态。
+- 外部认证\
+	比如高层之间的通信，主机A(TCP SYN)和主机B(TCP ACK)通信，能正常通信，就说明该邻居是可达的。高层会调用dst_confirm函数来确认邻居有效的。dst_confirm是对neigh_confirm函数的简单封装，后者才真正完成确认邻居可到性的工作并且完成L3到L2的映射。\
+	注意:neigh_confirm只更新neigh_confirm时间戳；neigh_periodic_timer函数(当邻居进入NUD_DELAY态时，启动的定时器到期后执行该函数)负责将邻居项状态更新为NUD_REACHABLE状态。只有当前状态为NUD_STALE状态时，才能使用外部认证。
+
+L3协议和邻居协议间的通用接口
+
+linux内核有个通用邻居层，通过一个虚拟函数表(Virtual Function Table, VFT)将L3协议和主要的L2传输函数链接起来。VFT是Linux内核最常用的机制，可以使各个子系统在不同的时间使用不同的函数。邻居子系统的VFT是由neigh_ops结构实现的。在每个neighbour结构的ops字段中有有一个指针，指向neigh_ops结构。
+
+【编者注】VFT，类比一下C++中的虚函数。这种函数的内容为空，每个成员可以按照自己的需求量身实现自己的函数功能，然后，对外表现出来的接口是一致的。
+
+接下来介绍邻居子系统的VFT第一次初始化及在一个邻居的生存期内VFT如何更新。
+
+先来看neighbour结构，这里我们之关系两个字段。
+
+	struct neighbour {
+		```
+		const struct neigh_ops *ops;
+		```
+		int (*output)(struct neighbour *, struct sk_buff *);
+		```
+	};
+
+再来看neigh_ops结构。
+
+	struct neigh_ops {
+		int family;
+		void (*solicit)(struct neighbour *, struct sk_buff *);
+		void (*error_report)(struct neighbour *, struct sk_buff *);
+		int (*output)(struct neighbour *, struct sk_buff *);
+		int (*connected_output)(struct neighbour *, struct sk_buff *);
+	};
+	solicit: 发送邻居请求的函数
+	error_report:一个邻居被认为不可达时就调用这个函数
+	output:用于所有情况
+	connected_output:当邻居是可到达的，就会使用该函数。
+
+当给定了一个neighbour项，并且对字段ops进行了初始化。那么，想要调用neigh_ops中的output字段所指向的函数，需要进行如下调用方式。
+
+	struct neighbour *neigh;
+	neigh->ops->output;
+
+这中做法，并没有在linux中得到应用，因为不够通用。neigh_ops结构中的四个函数功能类似，无论那个协议，最后都要调用这四个函数中的一个。具体用哪一个，这与当前的环境、设备配置情况有关。因此，为了剥离这些环境与配置的差异，在neighbour中定义了自己的output字段，每个协议在适当的时候从neigh_ops中选择一个函数出来赋值给neighbour中的output。这样，在邻居基础结构中，代码就比较清晰了。无论那种情况，都只需要使用如下调用来替换想面的调用。
+
+	neigh->output;
+
+neighbour->ops的初始化
+
+
+
+neighbour->output和neighbour_state的初始化
+
+邻居的output与其状态紧密相连(后者决定前者的取值)。邻居子系统提供一个通用函数neigh_update，它能够将邻居的状态改变为其输入参数中提供的状态。下面是一个简略的邻居状态转换图，并且给出了转换过程中要调用到的函数。
+
+									###############
+				------------<-------#NUD_REACHABLR#---<------------------
+				|	neigh_suspect	###############		neigh_connect	|
+				|						|	|							|(II)
+			 (I)|					 (I)|	^(I)						^
+				V						V	|							|
+		###########		(III)		###############		(I)			###########
+		#NUD_STALE#----->-----------#  NUD_DELAY  #----->-----------#NUD_PROBE#
+		###########					###############					###########
+	部分状态改变是异步的:这些转变由一个定时器管理，通过比较时间戳(time_after_eq/time_before_eq)进行触发。其他的状态转移由协议负责同步(例如neigh_event_send)。
+
+普通状态改变函数:neigh_connect和neigh_suspect
+
+邻居进入NUD_REACHABLE态的主要方式是:
+
+- 收到一个邻居应答\
+	收到一个邻居应答时，可能是由于第一次解析某个地址，也可能是由于确认邻居是否处于NUD_PROBE状态，协议就会通过neigh_update更新neigh->nud_state。这个更新立即发生，并且是同步的。
+- L4认证\
+	当收到一个L4可到达性确认后，就会第一次执行neigh_timer_handler函数，当收到一个L4可到达性确认后，就会第一次执行neigh_timer_handler函数，邻居状态就会改变为NUD_REACHABLE态。L4的确认是异步的并且可能会有稍微的延迟。
+- 人工配置\
+	当用户使用系统管理命令创建一个新的neighbour结构时，在该命令中可以指定命令状态，且NUD_REACHABLE态是合法的。这种情况下，通过neigh_update来调用neigh_connect。
+
+无论什么时候进入NUD_REACHABLE太，邻居基础结构就调用neigh_connect函数，将neighbour->output指向neigh_ops->connected_output。
+
+当某个邻居由NUD_REACHABLE态转移到NUD_STALE态或者NUD_DELAY态，或者仅仅初始化为与NUD_CONNECTED中的任一状态不同的状态(通过调用neigh_update可以实现)时，内核就请求neigh_suspect执行可到达性确认。这个工作由neigh_suspect完成，它将neighbour->output赋值为neigh_ops->output。
+
+neighbour->output使用的函数
+
+neighbour->output由邻居的constructor函数初始化，之后由函数neigh_connect和neigh_suspect根据协议事件的结果对其操作。neigh->output总是被设置成neigh_ops的一个虚拟函数。下面列出的函数可以被指定为neigh_ops的虚拟函数。
+
+- dev_queue_xmit\
+	当要传输一个封包时，L3总是调用这个函数，而不管接口设备的种类或者使用什么样的L3和L2协议。当出口设备上传输需要的所有信息都准备好，并且邻居子系统没有其它工作时，邻居协议就会将neigh_ops的函数指针初始化为dev_queue_xmit。
+- neigh_connect_output\
+	该函数只是填充L2帧头，然后调用dev_queue_xmit函数发送封包。因此，它希望L2地址被解析。邻居项在NUD_CONNECTED状态会用到这个函数。
+- neigh_resolve_output\
+	该函数在数据传输前将L3地址解析为L2地址。因此，当L3地址和L2地址的对应关系还没有建立或者需要对其进行确认时，就会用到该函数。如果创建一个邻居新结构并且需要对其L3地址进行解析时，neigh_resolve_output就会作为其默认函数。
+- neigh_blackhole\
+	该函数用于处理邻居结构不能被删除的临时情况，因为有人仍然要调用这个邻居项。函数neigh_balckhole会丢弃在输入接口上接收的任何封包。为了确保任何试图给该邻居传送封包的行为不会发生，这样的处理是必须的。因为该邻居项即将被删除。
+
+#邻居信息更新:neigh_update
+neigh_update定义在文件net/core/neighbour.c中，是用于更新邻居项链路层地址的通用函数。
+
+	int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new, u32 flags)
+	neigh:指向要更新的邻居项。
+	lladdr:新的链路曾地址。lladdr并不总是初始化为一个新值。例如，当调用neigh_update来删除一个邻居项时，会给lladdr传递一个NULL值。
+	new:新的NUD状态。
+	flags:用于传达信息，例如，是否覆盖一个已有的链路层地址等。下面是一些来自include/net/neighbour.h文件中的一些有效flags。
+		NEIGH_UPDATE_F_AMDIN
+			管理性改变。意思是说改变来自用户空间命令。
+		NEIGH_UPDATE_F_OVERRIDE
+			指当前的地址可以被lladdr覆盖。
+		NEIGH_UPDATE_ISROUTER (只用在IPv6)
+			表示这个邻居是个路由器。这个标识用于初始化neighbour->flag中的IPv6标识NTF_ROUTER。
+		NEIGH_UPDATE_F_OVERRIDE_ISROUTER (只用在IPv6)
+			表示IPv6 NTF_ROUTER标识可以被覆盖。
+		NEIGH_UPDATE_F_WEAK_OVERRIDE (只用在IPv6)
+			如果输入参数中提供的链路层地址lladdr与当前已知邻居neigh->ha的链路层地址不同，那么这个地址就是可以的(也就是说，邻居的状态会转移到NUD_STALE，以便触发可到达性认证)。
+
+下面对该函数详细剖析
+
+													+----------------+
+													| Lock neighbour |
+													+----------------+
+															|
+															V
+													+==================+
+													| Is current state | yes +===================================+ no
+													|  NUD_NOARP or    |---->| Is this an administrative change? |---->[2]
+													| NUD_PERMANENT?   |	 +===================================+
+													+==================+						|yes
+															|no									|
+															|<-----------------------------------
+															V
+											+==============================+ yes
+											| can this neigh be destroyed? |----->[2]
+											+==============================+
+															|no
+															V
+										yes	+==============================+ no
+									--------| Is this new state NUD_VALID? |---------
+									|		+==============================+		|
+									|												|
+									V												V
+								+=================+							+------------+
+							yes	|   Is our net    |							| stop timer |
+						--------| device addr_len |							+------------+
+						|		|   equal zero?   |									|
+						|		+=================+									V
+						V				|no							+=============================+ yes
+		+-----------------------------+	|							| Is old state NUD_CONNECTED? |------
+		| Set lladdr equal old lladdr |	|							+=============================+     |
+		+-----------------------------+	|											|					V
+				|						V											|			+-----------------+
+				|			+======================+ no								|			| neigh_suspect() |
+				|			| new lladdr not NULL? |---------						|			+-----------------+
+				|			+======================+		|						|					|
+				|						|yes				|						|<-------------------
+				|						V					|						V
+				|		+==============================+	|			+-------------------------+
+				|	 no |  old state equal new state   |	|			| Update neigh->nud_state |
+				|<------|			  &&			   |	|			+-------------------------+
+				|		| old lladdr equal new lladdr? |	|						|
+				|		+==============================+	|						V
+				|						|yes				|				+-----------------+
+				|						V					|				| Set notofy flag |
+				|		+-----------------------------+		|				+-----------------+
+				|<------| Set lladdr equal old lladdr |		|						|
+				|		+-----------------------------+		|						V
+				|											|				+================+
+				|						---------------------				|  Is old state  | no
+				|						|									| NUD_INCOMPLETE |----->[2]
+				|						V									|  or NUD_PROBE? |
+				|		+=============================+ yes					+================+
+				|		| Is old state not NUD_VALID? |----->[2] 					|yes
+				|		+=============================+								V
+				|						| no							+==========================+ no
+				|						V								| Is new state NUD_FAILED? |---->[2]
+				|		+-----------------------------+					+==========================+
+				|		| set lladdr equal old lladdr |								|yes
+				|		+-----------------------------+								V
+				|						|no									+--------------------+
+				----------------------->|									| Invalid this neigh |
+										V									+--------------------+
+					 no +=============================+								|
+				--------| Is new state NUD_CONNECTED? |								V
+				|		+=============================+						+-----------------+
+				|						|yes								| Set notify flag |
+				|						V									+-----------------+
+				|		+-----------------------------+								|
+				|		| Update confirmed timestamps |								V
+				|		+-----------------------------+							   [2]
+				|						|
+				|						V
+				|		+---------------------------+
+				------->| Update updated timestamps |
+						+---------------------------+
+								|
+								V
+					+=========================+ yes  +=====================+ yes  +==========================+
+					| Is old state NUD_VALID? |----->| Does new lladdr not |----->|       Is flags not       |
+					+=========================+      |  equal old lladdr?  |	  | NEIGH_UPDATE_F_OVERRIDE? |
+								|					 +=====================+      +==========================+
+								|							|no							|no			|yes
+								|							V							|			V
+								|					+===================+  				|   +--------------------+
+								|				 no |  Does new lladdr  |<---------------	| It is not a router |
+								|<------------------| equal old lladdr? |					+--------------------+
+								|					+===================+							|
+								|							|yes									V
+								|							V					+===============================+ no
+								|			 no +=========================+		|          Is flags             |--->[2]
+								|<--------------| Is new state NUD_STALE? |		| NEIGH_UPDATE_F_WEAK_OVERRIDE? |
+								|				+=========================+		+===============================+
+								|							|yes								|yes
+								|							V									V
+								|				+=======================+		+=============================+ no
+								|			 no |     Is flags not      |		| Is old state NUD_CONNECTED? |--->[2]
+								|<--------------| NEIGH_UPDATE_F_ADMIN? |		+=============================+
+								|				+=======================+						|yes
+								|							|yes								V
+								|							V					+---------------------------------+
+								|					+-----------------+			| Set new lladdr equal old lladdr |
+								|					|  Set new state  |			+---------------------------------+
+								|					| equal old state |							|
+								|					+-----------------+							V
+								|							|						+-------------------------+
+								|							|						| Set new state NUD_STALE |
+								|							|						+-------------------------+
+								|							|									|
+								--------------------------->|<-----------------------------------
+															V
+										yes	+=================================+
+							----------------| Does new state equal old state? |
+							|				+=================================+
+							|								|no
+							|								V
+							|						+------------+
+							|						| Stop timer |
+							|						+------------+
+							|								|
+							|								V
+							|				+=========================+ yes  +--------------+
+							|				| Is new state NUD_PROBE? |----->| Set probes 0 |
+							|				+=========================+		 +--------------+
+							|								|no						|
+							|								V						|
+							|			 no	+============================+			|
+							|		--------| Is new state NUD_IN_TIMER? |<----------
+							|		|		+============================+
+							|		|						|yes
+							|		|						V
+							|		|		+=============================+ yes  +--------------------------+
+							|		|		| Is new state NUD_REACHABLE? |----->| set timer reachable_time |
+							|		|		+=============================+		 +--------------------------+
+							|		|						|no									|
+							|		|						V									|
+							|		|				+-------------+								|
+							|		|				| Set timer 0 |								|
+							|		|				+-------------+								|
+							|		|						|									|
+							|		|						V									|
+							|		|	+-------------------------------------+					|
+							|		--->| Set neighbour state euqal new state |<-----------------
+							|			+-------------------------------------+
+							|								|
+							|								V
+							|						+-----------------+
+							|						| Set notify flag |
+							|						+-----------------+
+							|								|
+							------------------------------->|
+															V
+									 no	+=======================================+
+								--------| Does new lladdr not equal old lladdr? |
+								|		+=======================================+
+								|							|yes
+								|							V
+								|					+---------------+
+								|					| Sequence lock |
+								|					+---------------+
+								|							|
+								|							V
+								|				+---------------------------+
+								|				| Set old lladdr new lladdr |
+								|				+---------------------------+
+								|							|
+								|							V
+								|					+-----------------+
+								|					| Sequence unlock |
+								|					+-----------------+
+								|							|
+								|							V
+								|		+--------------------------------------------+
+								|		| Update all cache connected with this neigh |
+								|		+--------------------------------------------+
+								|							|
+								|							V
+								|			+=================================+ yes  +-----------------------+
+								|			| Is new state not NUD_CONNECTED? |----->| Update confirmed time |
+								|			+=================================+		 +-----------------------+
+								|							|no									|
+								|							|<-----------------------------------
+								|							V
+								|					+-----------------+
+								|					| Set notify flag |
+								|					+-----------------+
+								|							|
+								--------------------------->|
+															V
+											+=================================+ yes
+											| Does new state equal old state? |----->[2]
+											+=================================+
+															|no
+															V
+											+=============================+ no +-----------------+
+											| Is new state NUD_CONNECTED? |----| neigh_suspect() |
+											+=============================+    +-----------------+
+															|yes						|
+															V							|
+													+-----------------+					|
+													| neigh_connect() |					|
+													+-----------------+					|
+															|							|
+															|<---------------------------
+															|<---------------------------
+															V							|
+											+=============================+				|
+							----------------| Is old state not NUD_VALID? |				|
+							|				+=============================+				|
+							|								|yes						|
+							|								V							|
+							|					+=========================+				|
+							|					| Is new state NUD_VALID? |				|
+							|					+=========================+				|
+							|								|yes						|
+							|								V							|
+							|			+---------------------------------------+		|
+							|			| deal with neighbour and route affairs |		|
+							|			+---------------------------------------+		|
+							|								|							|
+							|								|							|
+							|								-----------------------------
+							|
+							---------------------
+												|
+												V
+									+--------------------+
+									| Update neigh->flag |
+									+--------------------+
+												|
+												V
+										+-----------+
+										| Do notify |
+										+-----------+
+
+
+
+
+
+
+
+
+
+
+(1)
+	(a)
+		[1]
+			[A]
+
+#arp_process() 处理流程
+	(1) 从 skb 中获取网络设备。struct net_device *dev = skb->dev。
+	(1) 从网络设备中获取 ipv4 的配置，存在 struct in_device *in_dev。
+	(1) 获取接口设备硬件类型。u16 dev_type = dev_type。
+
+	(1) ARP 使用什么样的硬件类型就决定了使用什么样的协议类型，两者必须匹配。
+
+(2) 包中的协议字段必须为 1(请求) 或者 2(发送)。
+
+(3) 获取 sip(source ip address), tip, sha(source hard address)。
+
+(4) 不回复 ARP 包的两种情况。
+	(a) tip 是回环地址：回环地址绑定在虚拟的回环设备上，该设备并没有实际的 MAC 地址，所以不需要回复 ARP REQUEST 包。
+	(b) tip 是多播(组播)地址：多播地址的接收方可能是一个或者多个，假设 A B C 三台主机，A 发送了一个多播 ARP 包，B C 都会接收到该报文，可是谁回复呢？回复之后主机 A 的 ARP 缓存该存谁的 MAC 地址呢？显然，谁回复都不好，干脆就不回复了。
+
+(5) sip 与 tip 相同(免费 ARP)的情况下，如果 IPV4_DEVCONF_DROP_GRATUITOUS_ARP 不为 0[\[参见\<net/ipv4/devinet.c\> (static struct ipv4_devconf ipv4_devconf = {})\]]()，丢弃该包 。免费 ARP 一般有两个用途：1.一台主机可以通过免费 ARP 确认是否有另外一台主机设置了相同的 IP。2.一台主机的硬件地址改变(比如更换网卡)，可以通过免费 ARP 通知其它主机更新 ARP 缓存。
+
+(6) 帧中继操作[\[参见 Q.922 文档\]]()
+
+(7) **看不懂，与路由相关**
+
+(8) sip 为 0.0.0.0。DHCP 网络中，client 和 server 都可以发送 sip 为 0.0.0.0 的 ARP 包，用来进行重复地址检测。
+	(a) 收到的包是 ARP 请求包，其中的 tip 和本机位于同一个 LAN 内，接受的设备上面配置的 ARP_IGNORE 值合法。
+		(A) 发送 ARP 应答包
+	(b) ==>>[out_consume_skb]
+(9) 收到的是 ARP 请求包，且路由查找(ip_route_input_noref())结果为 0?[>>(a)]:[>>(10)]
+	(a) 从 skb 中获取路由缓存标 rt，获取缓存标 rt 的地址类型 addr_type。
+	(b) addr_type 为 RTN_LOCAL?[>>[1]]:[>>(c)]
+		[1] in_dev 配置的 ignore 值是否为 0?[>>[A]]：==>>
+			[A] in_dev 是否配置了 ARP 过滤?[>>(i)]:[>>[B]]
+				(i) in_dev 配置的 filter 是否为 0?[>>[B]]:==>>
+			[B] n=neigh_event_ns()，返回不为空?[>>(i)]:==>>
+				(i) 发送 ARP 应答包
+				(ii) 释放 n
+	(c) in_dev 配置为 FORWARD?[>>[1]]:[>>(10)]
+		[1] addr_type 为 RTN_UNICAST 且 proxy 或者 vlan 或者 ( rt->dst.dev != dev 且 penigh_lookup)?[>>[A]]:[>>(10)]
+			[A] n = neigh_event_ns()?[>>(i)]:[>>[B]]
+				(i) 释放 n
+			[B] flags 为 LOCALLY_ENQUEUED 或者 包类型是发往本机的 或者 ARP 参数 PROXY_DELAY 为 0?[>>(i)]:[>>[C]]
+				(i) 发送 ARP 应答包
+			[C] pneigh_enqueue()
+			[D] ==>>
+
+(10) arp_tbl 中查找 IP 为 sip 的 neighbour 项，结果返回 n。
+
+(11) in_dev 上面配置的是否可以接受 arp 报文?[>>(a)]:[>>(b)]
+	(a) 没有 n ?[>>[1]]:[>>(12)]
+		[1] 收到的是 ARP 应答报文，且 sip 的地址类型是单播地址，或者收到的报文是一个免费 ARP 包?[>>[A]]:[>>(12)]
+			[A] arp_tbl 中查找 IP 为 sip 的 neighbour 项， 没有就创建这个项，并且返回该项 n 。
+
+(12) n 非空?[>>(a)]:[>>(13)]
+	(a) state=NUD_REACHABLE
+	(b) ARP 更新时间超时 或者 收到的是免费 ARP?override=1:override=0
+	(c) 如果收到的是 ARP 应答包，或者包的类型是发往本机的包?[>>[1]]:[>>(13)]
+		[1] state=NUD_STALE
+	(d) override?[>>[1]]:[>>[2]]
+		[1] neigh_update(n, sha, state, NEIGH_UPDATE_F_OVERRIDE)
+		[2] neigh_update(n, sha, state, 0)
+	(3) 释放 n。
+
+
+
+# ip_route_input_noref()
+	<net/ipv4/route.c>
+
+	int ip_route_input_noref(
+		struct sk_buff *skb,
+		__be32 daddr,
+		__be32 saddr,
+		u8 tos,
+		struct net_device *dev
+	)
+(1) daddr 是多播地址吗?[>>(a)]:[>>(2)]
+	(a) 从 dev 里面获取 struct in_device *in_dev 。
+	(b) 成功获取 in_dev ?[>>(A)]:[>>(c)]
+		(A) 发给本机(本机的 IP 加入了相应的组播)返回 1 (our = 1)。
+	(c) 没有获取到 in_dev 或者 our 为 0 且设备是一个 l3设备?[>>(A)]:[>>(d)]
+		(A) 从 skb->dev 里面再获取一次 struct in_device *ls_in_dev。获取到 l3_in_dev?[>>[1]]:[>>(d)]
+			[1] 发给本机(本机的 IP 加入了相应的组播)返回 1 (our = 1)。
+	(d) our=1?[>>(A)]:[>>(e)]
+		[A] 查找组播路由表(ip_route_input_mc())，返回查找结果。
+	(3) 返回 -EINVAL
+(2) 查找单播路由表(ip_route_input_slow())，返回查找结果。
+
+
+
+
+
+
+
+
+# 系统配置
+
+查看系统配置
+
+	sysctl -a
+
+临时修改系统配置
+
+	sysctl -w xx.yy.zz=**
+
+从制定文件加载系统参数，如不指定即从 /etc/sysctl.conf 中加载
+
+	sysctl -p
+
+
+## ipv4 下网络接口的一些配置
+
+配置项在 include/uapi/linux/ip.h 中定义。
+
+	enum
+	{
+		IPV4_DEVCONF_FORWARDING=1,
+		IPV4_DEVCONF_MC_FORWARDING,
+		IPV4_DEVCONF_PROXY_ARP,
+		IPV4_DEVCONF_ACCEPT_REDIRECTS,
+		IPV4_DEVCONF_SECURE_REDIRECTS,
+		IPV4_DEVCONF_SEND_REDIRECTS,
+		IPV4_DEVCONF_SHARED_MEDIA,
+		IPV4_DEVCONF_RP_FILTER,
+		IPV4_DEVCONF_ACCEPT_SOURCE_ROUTE,
+		IPV4_DEVCONF_BOOTP_RELAY,
+		IPV4_DEVCONF_LOG_MARTIANS,
+		IPV4_DEVCONF_TAG,
+		IPV4_DEVCONF_ARPFILTER,
+		IPV4_DEVCONF_MEDIUM_ID,
+		IPV4_DEVCONF_NOXFRM,
+		IPV4_DEVCONF_NOPOLICY,
+		IPV4_DEVCONF_FORCE_IGMP_VERSION,
+		IPV4_DEVCONF_ARP_ANNOUNCE,
+		IPV4_DEVCONF_ARP_IGNORE,
+		IPV4_DEVCONF_PROMOTE_SECONDARIES,
+		IPV4_DEVCONF_ARP_ACCEPT,
+		IPV4_DEVCONF_ARP_NOTIFY,
+		IPV4_DEVCONF_ACCEPT_LOCAL,
+		IPV4_DEVCONF_SRC_VMARK,
+		IPV4_DEVCONF_PROXY_ARP_PVLAN,
+		IPV4_DEVCONF_ROUTE_LOCALNET,
+		IPV4_DEVCONF_IGMPV2_UNSOLICITED_REPORT_INTERVAL,
+		IPV4_DEVCONF_IGMPV3_UNSOLICITED_REPORT_INTERVAL,
+		IPV4_DEVCONF_IGNORE_ROUTES_WITH_LINKDOWN,
+		IPV4_DEVCONF_DROP_UNICAST_IN_L2_MULTICAST,
+		IPV4_DEVCONF_DROP_GRATUITOUS_ARP,
+		__IPV4_DEVCONF_MAX
+	};
+
+这些参数导出到 /proc 文件系统中。
+
+	╔║/proc/sys/net/ipv4/conf/eth0
+	╚═>> tree /proc/sys/net/ipv4/conf/eth0/
+	/proc/sys/net/ipv4/conf/eth0/
+	├── accept_local
+	├── accept_redirects
+	├── accept_source_route
+	├── arp_accept
+	├── arp_announce
+	├── arp_filter
+	├── arp_ignore
+	├── arp_notify
+	├── bootp_relay
+	├── disable_policy
+	├── disable_xfrm
+	├── force_igmp_version
+	├── forwarding
+	├── igmpv2_unsolicited_report_interval
+	├── igmpv3_unsolicited_report_interval
+	├── ignore_routes_with_linkdown
+	├── log_martians
+	├── mc_forwarding
+	├── medium_id
+	├── promote_secondaries
+	├── proxy_arp
+	├── proxy_arp_pvlan
+	├── route_localnet
+	├── rp_filter
+	├── secure_redirects
+	├── send_redirects
+	├── shared_media
+	├── src_valid_mark
+	└── tag
+
+参数的解释见 Documentation/networking/ip-sysctl.txt
+
+## 意义
+
+### forwarding
+
+布尔型，表示是否开启转发功能。\
+这个参数比较特殊，它的改变会将所有的配置参数恢复到它们的初始状态。(hosts 参见 RFC1122，routers 参见 RFS1812)
+
+|取值|含义|
+|:--|:--------------------------------------------------------------------------|
+|`0`|disable                                                                    |
+|`1`|enable                                                                     |
+测试: host 中 eth0 该值为 0; router 中 eth0(lan)/eth1(wan) 值为 1/1。
+
+<hr>
+
+### arp_accept
+
+布尔型，定义对不在ARP表中的IP地址发出的免费ARP请求包的处理方式。如果这个值打开的话，不管是免费ARP请求包还是免费ARP响应包都会触发更新ARP表。如果ARP表已经包含了免费ARP请求包中的IP实例，那么不管这个至开启与否，都会更新ARP表。
+
+|取值|含义|
+|:---|--------------------------------------------------------------------------|
+|`0` |不在ARP表中创建对应IP的实例|
+|`1` |在ARP表中创建对应IP的实例|
+
+<hr>
+
+### arp_announce：
+
+整型，定义了不同的限制级别来决定在某个接口上发送的ARP请求报文中所使用的本地源IP地址。限制级别越高，我们收到ARP响应报文的几率就越高。限制级别越低，表明ARP请求报文中包含的发送方的有效信息就越多。
+
+|取值|含义|
+|:---|:---------------------------------------------------------------------------|
+|`0`(default) |使用配置在任意一个网络接口上的IP地址。通常就是待发送数据包的源IP地址|
+|`1` |一个接口上尽量避免使用不属于数据包中目的IP所在的子网的IP作为ARP请求报文的源IP。当目标主机通过该接口可达即接口IP与目标主机接收报文的接口IP属于同一个子网时(就是同一个LAN内)，这种模式是有用的。在发送ARP请求时，发送host会检查每个接口所属的子网，然后找出与数据包的的目的IP属于同一个子网的接口，将该接口的IP地址作为ARP请求报文的源IP地址。如果找不到这样的接口，那么就按等级2进行。|
+|`2` |我们总是会根据数据包来选择一个最好的本地IP地址。这种情况下，我们忽略掉IP报文中的源IP地址，然后选择我们更喜欢用一个与通目的主机通信的IP地址。选择这个IP地址：首先我们找出所有输出网卡的IP地址，然后根据这些IP地址获取到相应的子网，再找出包含IP报文中目的IP的那个子网，最后选择这个属于这个子网对应的本地IP地址作为ARP请求报文中的源IP地址。如果找不到合适的本地地址，我们就会选择第一个网络接口上(或者其他网络接口上)面配置的IP地址，我们期望在发送ARP请求报文之后，收到ARP响应报文，甚至有时候，不管我们在ARP请求报文中使用的哪一个IP地址。|
+
+<hr>
+
+### arp_filter
+
+布尔型，只要任意一个接口的arp_filter(conf/{all,interface}/arp_filter)设置为TRUE，那么该接口的arp_filter也为TRUE。反之设为FALSE。
+
+|取值|含义|
+|:---|:---------------------------------------------------------------------------|
+|`0(default)`| 内核可以响应其他接口上的 arp 请求。这种做法看起来是错误的，但其实是有意义的，它可以增加成功通信的几率。IP是一个完整的主机所拥有的，而不是被一个具体的接口所拥有，只有在一些复杂的设置(例如负载均衡)中，这种行为才会出现问题。|
+|`1`| 允许有多个网络接口接在同一个子网内。对于特定的网络接口收到的ARP请求，该网络接口都会应答，而不管真正的数据包是否会从该网络接口上路由出去(因此，对于这些数据包，必须使用基于源(IP/MAC)的路由来工作)。换句话说，它可以控制哪个网络接口来响应一个ARP请求。|
+
+<hr>
+
+### arp_ignore
+
+整型，定义了不同的模式来响应ARP请求报文。这些模式主要根据ARP请求中的目的IP地址来区分的。
+
+|取值|含义|
+|:---|:--------------------------------------------------------------------------|
+|`0`(default) |目的地址是本地任意一个网络接口上面配置的IP地址，就发送ARP响应报文|
+|`1`|只有目的地址是本地输入网卡的IP地址时，才发送ARP响应报文|
+|`2`|只有目的地址是本地输入网卡的IP地址，并且发送方的IP地址与本地输入网卡的IP地址属于同一个子网时，才响应相应的ARP请求报文|
+|`3`|如果本地地址被配置成范围主机(scope host)，就不响应ARP请求报文。只有本地地址被配置成全局(global)地址或者链路(link)地址时，才响应ARP请求报文|
+|`4-7`|保留|
+|`8`|ARP请求报文中的目的IP地址是本地的任何IP地址，都不做响应|
+
+<hr>
+
+### arp_notify
+
+布尔型，定义模式，来通知地址或者设备的改变。
+
+|取值|含义|
+|:---|:---------------------------------------------------------------------------|
+|`0` | 什么也不做|
+|`1` | 当设备启动或者硬件地址改变时，就发出一个免费ARP请求|
+
+<hr>
+
+### drop_gratuious_arp
+
+布尔型，丢弃所有的免费ARP数据包，比如，已知在网络上有一个好的ARP代理服务器，所有免费ARP数据包就没有必要使用了。(在802.11中，一定要禁用免费ARP以防攻击)。\
+默认值：关闭(0)
+
+<hr>
+
+### route_localnet
+
+布尔型，不要认为在路由中，回环地址就是一个不可能出现的源地址或者目的地址。该值的配置可以达到让127/8的网络进行本地路由的目的。\
+默认值：FALSE(0)

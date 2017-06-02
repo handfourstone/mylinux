@@ -255,15 +255,15 @@ struct neighbour {
    在 include/net/neighbour.h 和
    include/linux/rtnetlink.h中。*/
 	__u8			nud_state;
-/* 当 neigh_create 函数调用协议的 constructor 方法(对于 ARP
-   是 arp_constructor)创建邻居项时，就会设置这个字段。它的
-   值可以用于各种场合，例如，决定哪些值可以赋给 nud_state。
-   type 可用的值在 inlcude/linux/rtnetlink.h 中。在邻接子
-   系统中，我们感兴趣的值只有：RTN_UNICAST、RTN_LOCAL、
-   RTN_BROADCAST、RTN_ANYCAST 和 RTN_MULTICAST。
-   加入有个 IPv4 地址(例如，与一个neighbour 项相关的L3地址)，
-   inet_addr_type 函数就会找到相应的 RTN_xxx 值，对于 IPv6
-   来说，有个类似的函数：ipv6_addr_type。*/
+/*******************************************************************************
+ * 当 neigh_create 函数调用协议的 constructor 方法(对于 ARP是 arp_constructor)创
+ * 建邻居项时，就会设置这个字段。它的值可以用于各种场合，例如，决定哪些值可以赋
+ * 给 nud_state。type 可用的值在 inlcude/linux/rtnetlink.h 中。在邻接子系统中，
+ * 我们感兴趣的值只有：RTN_UNICAST、RTN_LOCAL、RTN_BROADCAST、RTN_ANYCAST 和
+ * RTN_MULTICAST。加入有个 IPv4 地址(例如，与一个neighbour 项相关的L3地址)，
+ * inet_addr_type 函数就会找到相应的 RTN_xxx 值，对于 IPv6来说，有个类似的函数：
+ * ipv6_addr_type。
+ * ****************************************************************************/
 	__u8			type;
 /* 若 dead 被置为 1，表示该结构体将被删除，不能再使用了。*/
 	__u8			dead;
@@ -395,7 +395,7 @@ struct neigh_table {
 	struct neigh_parms	parms;
 /* 没有使用 */
 	struct list_head	parms_list;
-/* 这个变量用来控制 gc_timer 定时器多久会超时，并启动垃圾回收。定时器每次
+/* 这个变量用来控制 gc_interval 定时器多久会超时，并启动垃圾回收。定时器每次
  * 只会触发 hash 表中一个 bucket 中的垃圾回收。*/
 	int			gc_interval;
 /* 这三个阈值定义了三个不同级别的内存状态，邻居协议可将这些状态赋给
@@ -409,7 +409,7 @@ struct neigh_table {
 	struct delayed_work	gc_work;
 /* 当 proxy_queue 队列中至少由一个元素时，就会启动这个定时器。若定时器
  * 超时，执行的处理函数是neigh_proxy_process。由 neigh_table_init 函数
- * 在协议初始化时对这个定时器初始化。它与 neigh_table -> gc_timer 定时器
+ * 在协议初始化时对这个定时器初始化。它与 neigh_table -> gc_interval 定时器
  * 不同，不会周期性启动，只会在需要的时候启动(例如，在往 proxy_queue中
  * 首次增加一个元素时，协议就会启动它)。*/
 	struct timer_list 	proxy_timer;
@@ -733,6 +733,10 @@ __neigh_lookup_errno(struct neigh_table *tbl, const void *pkey,
 	return neigh_create(tbl, pkey, dev);
 }
 
+/*******************************************************************************
+ * 这个控制结构在 ARP 中使用工作队列时会发挥作用，sched_next 代表下次被调度的时
+ * 间，flags 是标志。
+ * ****************************************************************************/
 struct neighbour_cb {
 	unsigned long sched_next;
 	unsigned int flags;

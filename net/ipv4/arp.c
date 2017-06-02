@@ -743,6 +743,10 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
   *	there will be an ARP proxy and gratuitous ARP frames are attacks
   *	and thus should not be accepted.
   */
+/*******************************************************************************
+ * DROP_GRATUITOUS_ARP = IPV4_DEVCONF_DROP_GRATUITOUS_ARP
+ * 定义于 <include/uapi/linux/ip.h>
+ * ****************************************************************************/
 	if (sip == tip && IN_DEV_ORCONF(in_dev, DROP_GRATUITOUS_ARP))
 		goto out_free_skb;
 
@@ -768,12 +772,17 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
  *  and in the case of requests for us we add the requester to the arp
  *  cache.
  */
-
+/*******************************************************************************
+ * skb_metadata 定义于 <include/net/dst_metadata.h> 中
+ * ****************************************************************************/
 	if (arp->ar_op == htons(ARPOP_REQUEST) && skb_metadata_dst(skb))
 		reply_dst = (struct dst_entry *)
 			    iptunnel_metadata_reply(skb_metadata_dst(skb),
 						    GFP_ATOMIC);
 
+/*******************************************************************************
+ * 发送无端 ARP 包进行重复地址检测。参考 RFC2131 0 地址的使用。
+ * ****************************************************************************/
 	/* Special case: IPv4 duplicate address detection packet (RFC2131) */
 	if (sip == 0) {
 		if (arp->ar_op == htons(ARPOP_REQUEST) &&
