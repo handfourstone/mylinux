@@ -630,6 +630,62 @@ NUD_STALE、NUD_DELAY、NUD_PROBE三个状态都支持可到达性确认。使�
 
 # 邻居子系统:基础结构
 
+前面我们看到了邻居协议要解决的主要问题，也知道linux内核将部分解决方法抽象为一个通用基础结构，并且这个通用基础结构由各种邻居协议共同享用。本章我们将看到这个基础结构是如何设计的。尤其是邻居协议如何与这个通用基础结构相连，代理和缓存是如何实现的，以及外部子系统(例如，高层协议)如何将其关心的事件通知邻居协议。接下来还会说明L3协议，例如IPv4，如何与它们的邻居协议相连接，以及等待地址解析的缓冲区队列是如何实现的。
+
+## 主要的数据结构
+
+为了理解邻居基础结构的代码，我们首先对邻居子系统中使用较多的一些数据结构做一下介绍，并且解释他们之间是如何交互的。
+
+这些数据结构的定义绝大部分在include/net/neighbour.h文件中。
+
+1. struct neighbour
+
+	存储邻居的有关信息，例如，L2和L3地址、NUD状态，访问该邻居经过的设备等。注意，一个neighbour项不是与一台主机相关联，而是与一个L3地址相关联。因为一台主机可能会有多个NIC，也就有多个L3地址。
+
+2. struct neigh_table
+
+	描述一种邻居协议的所有参数和函数。每个邻居协议都有一个该结构体的实例。所有的实例都插入到由一个静态变量neigh_table指向的全局表中。
+
+3. struct neigh_parms
+
+	对每个设备上邻居协议进行调整的一组参数。由于在大部分接口上可以启动多个协议(例如IPv4和IPv6)，所以一个net_device结构可以关联多个neigh_parms结构。
+
+4. struct neigh_ops
+
+	一组函数，用来表示L3协议(如IP)和dev_queue_xmit之间的接口。在下面一节[L3协议和邻居协议间的通用接口](#L3协议和邻居协议间的通用接口)中还有对其详细介绍。这些虚拟函数可以根据它们使用的上下文环境来改变(也就是说根据前面介绍的邻居的状态)。
+
+5. struct hh_cache
+
+	缓存链路层头部信息用于加快传输速度。一次将一个头部信息复制到发送缓冲区中比一个一个字节填充它快很多。并不是所有的网络设备都支持缓存头部信息。参考[L2帧头缓存](#L2帧头缓存)一节。
+
+
+6. struct rtable
+7. struct dst_entry
+
+	//////////////////////////////////////////////////////////////////////
+	当主机需要路由一个封包的时候，首先会查询自己的路由缓存中的目的主机信息，在缓存不命中时，接着才会查询路由表。每次查询路由表时，都会将结果保存在路由缓存中。IPv4路由缓存由结构rtable组成，每一个rtable实例对应于一个不同的IP地址、下一跳地址和一个dst_entry类型结构，用于存储与协议无关的信息。dst_entry包含一个指向neighbour结构的指针，该neighbour结构和下一跳地址有关。
+
+邻居协议也使用一些小的数据结构。例如，pneigh_entry结构用于基于目的地址的代理，neigh_statistics结构用于收集邻居协议的统计数据。第一个结构在[担任代理](#担任代理)一节会介绍。图中也包含下面一些数据结构:
+
+8. in_device、inet6_dev
+
+	分别保存某个设备上的IPv4和IPv6配置信息。
+
+9. net_device
+
+	对内核识别的每个网络设备都有一个net_device结构。
+
+
+
+
+
+
+
+
+
+
+
+
 L3协议和邻居协议间的通用接口
 
 linux内核有个通用邻居层，通过一个虚拟函数表(Virtual Function Table, VFT)将L3协议和主要的L2传输函数链接起来。VFT是Linux内核最常用的机制，可以使各个子系统在不同的时间使用不同的函数。邻居子系统的VFT是由neigh_ops结构实现的。在每个neighbour结构的ops字段中有有一个指针，指向neigh_ops结构。
@@ -3315,3 +3371,155 @@ RARP是一个旧协议，用于自动配置一台动态主机。他的功能后�
 ### route_localnet
 
 布尔型，不要认为在路由中，回环地址就是一个不可能出现的源地址或者目的地址。该值的配置可以达到让127/8的网络进行本地路由的目的。\
+
+
+
+
+# 邻居子系统:其他问题
+
+## 本部分涉及的数据结构
+
+在[主要的数据结构](#主要的数据结构)一节中，我们对邻居子系统使用的主要数据结构做了个简单的描述。本节，我们讨论每个结构体的每个字段。
+
+下图给出了邻居子系统设计到的数据结构所在的文件。
+
+	include
+	├── net
+	│   ├── route.h
+	│   ├── dst.h
+	│   ├── if_inet6.h
+	│   └── neighbour.h
+	│   	├── struct neighbour
+	│   	├── struct neigh_table
+	│   	├── struct neigh_parms
+	│   	├── struct neigh_ops
+	│   	├── struct neigh_statistics
+	│   	└── struct pneigh_entry
+	└── linux
+		├── netdevice.h
+		│	└── syruct hh_cache
+		└── inet_device.h
+			
+	Figure. Distributiton if data structures in kernel files
+
+### neighbour结构
+
+邻居是用struct neighbour结构定义的。该结构比较复杂，包括状态字段、与L3协议的接口相关虚函数、定时器和缓存的L2帧头。
+
+1. struct neighbour __rcu *next
+
+	指向下一个邻居项。
+
+2. struct neigh_table *tbl
+
+	指向该结构体所属的neigh_table。每个协议都有一個neigh_table的实例，该协议下的所有neighbour都被neigh_table管理。
+
+3. struct neigh_parms *parms
+
+	指向neigh_parms结构体，该结构体用来调整邻居想行为。
+
+4. unsigned long confirmed
+
+	时间戳，表示该邻居项可到达性最后验证过的时间。L4协议使用neigh_confirm函数更新这个值。邻居基础结构用neigh_upgrade函数更新它。
+
+5. unsigned long updated
+
+	时间戳，表示neigh_update函数最近一次更新该邻居项的时间，首次初始化由neigh_alloc函数设置。不要将neigh_confirmed和updated混淆，这两个字段表示不同的事件。当邻居的状态改变时，要设置updata字段；而confirmed字段只记录邻居特殊的一次状态改变:当邻居项最近一次证明是有效时，发生的状态转变。
+
+6. rwlock_t lock
+
+	用于在出现竞争时(包括并发的读和写)对neighbour结构进行保护。
+
+7. atomic_t refcnt
+
+	该结构的引用计数。
+
+8. struct sk_buff_head arp_queue
+
+	高层来的数据包中的目的地址还没有被解析，这些封包就会被放入这个缓冲队列中。队列名字虽然叫arp_queue，但是这个队列能被所有协议使用。
+
+8. unsigned int arp_queue_len_bytes
+
+	arp_queue缓冲队列的长度。
+
+9. struct timer_list timer
+
+	用于处理几个任务的定时器。
+
+10. unsigned long used
+
+	邻居项最后一次被使用的时间戳。这个值不会随着数据传输而同步更新。当邻居项还没有到达NUD_CONNECTED态时，这个字段由neigh_resolve_output函数调用neigh_event_send来更新。相应的，当邻居项进入NUD_CONNECTED态时，它的值由neigh_periodic_work更新为该邻居项的可到达性最近被证实的时间。
+
+11. atomic_t probes
+
+	失败的solicitation尝试的次数。它的值由neigh_timer_handler定时器检测。当尝试次数到达允许的最大值时，这个定时器就将该neighbour项转移到NUD_FAILED态。
+
+12. __u8 flags
+
+	这个字段的可选值在include/uapi/linux/neighbour.h文件中。分别为
+
+		NTF_USE
+		NTF_SELF
+		NTF_MASTER
+		NTF_PROXY
+		NTF_EXT_LEARNED
+		NTF_ROUTER
+
+13. __u8 nud_state
+
+	邻居状态，该字段的可选值在include/uapi/linux/neighbour.h中。分别为
+
+		NUD_INCOMPLETE
+		NUD_REACHABLE
+		NUD_STALE
+		NUD_DELAY
+		NUD_PROBE
+		NUD_FAILED
+		NUD_NOARP
+		NUD_PERMANENT
+		NUD_NONE
+
+	上述9个值的含义在[基本状态](#基本状态)一节已经介绍过。
+
+14. __u8 type
+
+	邻居地址类型，该字段的可选值在include/uapi/linux/rtnetlink.h中。分别为
+
+		RTN_UNSPEC			未知的路由
+		RTN_UNICAST			网关或直接路由
+		RTN_LOCAL			本地接收
+		RTN_BROADCAST		本地广播接收广播发送
+		RTN_ANYCAST			本地广播接收单播发送
+		RTN_MULTICAST		多播路由
+		RTN_BLACKHOLE		丢弃
+		RTN_UNREACHABLE		目标不可达
+		RTN_PROHIBIT		管理禁止
+		RTN_THROW			不再此路由表中
+		RTN_NAT				转发该地址
+		RTN_XRESOLVE		使用外部解决
+
+15. __u8 dead
+
+	表示该邻居项是否可以被删除，dead为1，表示该邻居项将被删除，不能在使用。
+
+16. seqlock_t ha_lock
+
+	顺序锁。
+
+17. unsigned char ha[ALIGN(MAX_ADDR_LEN, sizeof(unsigned long))]
+
+	与 pkey表示的L3地址相关联的L2地址。
+
+18. struct hh_cache hh
+
+	L2帧头缓存。
+
+19. int (*output)(struct neighbour *, struct sk_buff *)
+
+	用于向邻居传输封包的函数。根据NUD状态，该函数指针指向的函数在该结构体的生存期内可以多次改变。它的初始化用neigh_table结构的constructor方法。当邻居项的状态为NUD_REACHABEL态或者NUD_STALE态时，可以分别通过调用neigh_connect和neigh_suspect函数更新该字段的值。该字段的取值为struct neigh_ops中四个函数之一。
+
+20. const struct neigh_ops *ops
+
+	参见[ops字段中的虚函数](#ops字段中的虚函数)一节。
+
+21.
